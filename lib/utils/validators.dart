@@ -1,5 +1,21 @@
 /// Validaciones reutilizables para los formularios.
 class Validators {
+  static final _correoRegex = RegExp(r'^[\w.+-]+@[\w-]+(\.[\w-]+)+$');
+
+  static String? correo(String? v) {
+    final t = (v ?? '').trim();
+    if (t.isEmpty) return 'El correo es obligatorio';
+    if (!_correoRegex.hasMatch(t)) return 'Ingresa un correo válido';
+    return null;
+  }
+
+  static String? clave(String? v) {
+    final t = v ?? '';
+    if (t.isEmpty) return 'La contraseña es obligatoria';
+    if (t.length < 6) return 'Mínimo 6 caracteres';
+    return null;
+  }
+
   static String? nombre(String? v) {
     final t = (v ?? '').trim();
     if (t.isEmpty) return 'El nombre es obligatorio';

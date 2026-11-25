@@ -1,15 +1,15 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../models/producto.dart';
 import '../services/inventario_service.dart';
 import '../utils/app_theme.dart';
-import '../utils/formatters.dart';
-import '../utils/validators.dart';
+import '../utils/errores.dart';
+import '../utils/mensajes.dart';
 import '../widgets/custom_text_field.dart';
 import '../widgets/producto_tile.dart';
+import '../widgets/sync_badge.dart';
 
-/// PANTALLA 3: consulta y resultados (inventario, búsqueda y ventas).
+/// PANTALLA 2: consulta / listado de los productos guardados en Firestore.
 class InventarioScreen extends StatefulWidget {
   const InventarioScreen({super.key});
 
@@ -20,7 +20,14 @@ class InventarioScreen extends StatefulWidget {
 class _InventarioScreenState extends State<InventarioScreen> {
   final _service = InventarioService.instance;
   final _busquedaCtrl = TextEditingController();
+  late final Stream<ListaSync<Producto>> _stream;
   bool _soloBajo = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _stream = _service.productosStream();
+  }
 
   @override
   void dispose() {
@@ -28,63 +35,30 @@ class _InventarioScreenState extends State<InventarioScreen> {
     super.dispose();
   }
 
-  void _mensaje(String texto, {bool error = false}) {
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(
-        content: Text(texto),
-        backgroundColor: error ? AppColors.alerta : AppColors.exito,
-        behavior: SnackBarBehavior.floating,
-      ));
+  List<Producto> _filtrar(List<Producto> todos) {
+    final q = _busquedaCtrl.text.trim().toLowerCase();
+    return todos.where((p) {
+      final coincide = q.isEmpty || p.nombre.toLowerCase().contains(q) || p.categoria.toLowerCase().contains(q);
+      return coincide && (!_soloBajo || p.stockBajo);
+    }).toList();
   }
 
-  Future<void> _vender(Producto p) async {
-    final cantidad = await showDialog<int>(
-      context: context,
-      builder: (_) => _VentaDialog(producto: p),
-    );
-    if (cantidad == null) return;
-    final total = _service.vender(p, cantidad);
-    _mensaje('Venta registrada: $cantidad x ${p.nombre} = ${formatoPesos(total)}');
-    if (p.stockBajo && mounted) {
-      await showDialog<void>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          icon: const Icon(Icons.warning_amber_rounded, color: AppColors.alerta, size: 40),
-          title: const Text('Stock bajo'),
-          content: Text('Quedan ${p.stock} unidades de "${p.nombre}". Es momento de reabastecer.'),
-          actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Entendido'))],
-        ),
-      );
-    }
-  }
-
-  Future<void> _eliminar(Producto p) async {
-    final confirmar = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Eliminar producto'),
-        content: Text('¿Seguro que quieres eliminar "${p.nombre}"? Esta acción no se puede deshacer.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancelar')),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: AppColors.alerta),
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Eliminar'),
-          ),
-        ],
-      ),
-    );
-    if (confirmar == true) {
-      _service.eliminar(p.id);
-      _mensaje('Producto "${p.nombre}" eliminado');
+  Future<void> _recargar() async {
+    try {
+      final n = await _service.recargarDesdeServidor();
+      if (mounted) mostrarMensaje(context, 'Datos recargados desde el servidor ($n productos)');
+    } catch (e) {
+      if (mounted) mostrarMensaje(context, mensajeError(e), error: true);
     }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Inventario')),
+      appBar: AppBar(
+        title: const Text('Inventario'),
+        actions: [IconButton(tooltip: 'Recargar', icon: const Icon(Icons.sync), onPressed: _recargar)],
+      ),
       floatingActionButton: FloatingActionButton(
         tooltip: 'Registrar producto',
         onPressed: () => Navigator.pushNamed(context, '/registro'),
@@ -96,7 +70,7 @@ class _InventarioScreenState extends State<InventarioScreen> {
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
             child: CustomTextField(
               controller: _busquedaCtrl,
-              label: 'Buscar producto',
+              label: 'Buscar producto o categoría',
               icon: Icons.search,
               onChanged: (_) => setState(() {}),
             ),
@@ -113,32 +87,46 @@ class _InventarioScreenState extends State<InventarioScreen> {
             ),
           ),
           Expanded(
-            child: ListenableBuilder(
-              listenable: _service,
-              builder: (context, _) {
-                final lista = _service.buscar(_busquedaCtrl.text, soloStockBajo: _soloBajo);
+            child: StreamBuilder<ListaSync<Producto>>(
+              stream: _stream,
+              builder: (context, snap) {
+                if (snap.hasError) {
+                  return Center(
+                      child: Padding(padding: const EdgeInsets.all(24), child: Text(mensajeError(snap.error!))));
+                }
+                if (!snap.hasData) return const Center(child: CircularProgressIndicator());
+                final lista = _filtrar(snap.data!.items);
                 return Column(
                   children: [
                     Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text('${lista.length} productos · ventas de hoy: ${formatoPesos(_service.ventasHoy)}',
-                            style: const TextStyle(color: AppColors.textoSuave, fontSize: 12)),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text('${lista.length} de ${snap.data!.items.length} productos',
+                                style: const TextStyle(color: AppColors.textoSuave, fontSize: 12)),
+                          ),
+                          SyncBadge(pendiente: snap.data!.pendiente, desdeCache: snap.data!.desdeCache),
+                        ],
                       ),
                     ),
                     Expanded(
-                      child: lista.isEmpty
-                          ? const Center(child: Text('No se encontraron productos'))
-                          : ListView.builder(
-                              padding: const EdgeInsets.fromLTRB(16, 4, 16, 80),
-                              itemCount: lista.length,
-                              itemBuilder: (_, i) => ProductoTile(
-                                producto: lista[i],
-                                onVender: () => _vender(lista[i]),
-                                onEliminar: () => _eliminar(lista[i]),
+                      child: RefreshIndicator(
+                        onRefresh: _recargar,
+                        child: lista.isEmpty
+                            ? ListView(children: const [
+                                SizedBox(height: 80),
+                                Center(child: Text('No se encontraron productos')),
+                              ])
+                            : ListView.builder(
+                                padding: const EdgeInsets.fromLTRB(16, 4, 16, 80),
+                                itemCount: lista.length,
+                                itemBuilder: (_, i) => ProductoTile(
+                                  producto: lista[i],
+                                  onTap: () => Navigator.pushNamed(context, '/detalle', arguments: lista[i].id),
+                                ),
                               ),
-                            ),
+                      ),
                     ),
                   ],
                 );
@@ -147,64 +135,6 @@ class _InventarioScreenState extends State<InventarioScreen> {
           ),
         ],
       ),
-    );
-  }
-}
-
-class _VentaDialog extends StatefulWidget {
-  final Producto producto;
-  const _VentaDialog({required this.producto});
-
-  @override
-  State<_VentaDialog> createState() => _VentaDialogState();
-}
-
-class _VentaDialogState extends State<_VentaDialog> {
-  final _formKey = GlobalKey<FormState>();
-  final _ctrl = TextEditingController(text: '1');
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final p = widget.producto;
-    final cantidad = int.tryParse(_ctrl.text) ?? 0;
-    return AlertDialog(
-      title: Text('Vender ${p.nombre}'),
-      content: Form(
-        key: _formKey,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text('Disponibles: ${p.stock} · ${formatoPesos(p.precio)} c/u'),
-            const SizedBox(height: 12),
-            CustomTextField(
-              controller: _ctrl,
-              label: 'Cantidad',
-              icon: Icons.numbers,
-              keyboardType: TextInputType.number,
-              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-              validator: (v) => Validators.cantidadVenta(v, p.stock),
-              onChanged: (_) => setState(() {}),
-            ),
-            const SizedBox(height: 12),
-            Text('Total: ${formatoPesos(p.precio * cantidad)}', style: const TextStyle(fontWeight: FontWeight.bold)),
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancelar')),
-        FilledButton(
-          onPressed: () {
-            if (_formKey.currentState!.validate()) Navigator.pop(context, int.parse(_ctrl.text));
-          },
-          child: const Text('Confirmar venta'),
-        ),
-      ],
     );
   }
 }
