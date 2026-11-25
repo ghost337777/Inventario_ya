@@ -1,0 +1,68 @@
+rules_version = '2';
+
+// Reglas de seguridad de Cloud Firestore para InventarioYa.
+// Copia este contenido en: Firebase Console > Firestore Database > Reglas > Publicar.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- Funciones auxiliares ----------
+    function autenticado() {
+      return request.auth != null;
+    }
+    // El documento que ya existe pertenece al usuario que hace la petición.
+    function esDueno() {
+      return autenticado() && resource.data.uid == request.auth.uid;
+    }
+    // El documento que se quiere escribir queda a nombre del usuario.
+    function escribeComoDueno() {
+      return autenticado() && request.resource.data.uid == request.auth.uid;
+    }
+    function productoValido() {
+      let d = request.resource.data;
+      return d.nombre is string && d.nombre.size() >= 3 && d.nombre.size() <= 40
+        && d.categoria is string
+        && d.precio is int && d.precio > 0
+        && d.stock is int && d.stock >= 0
+        && d.stockMinimo is int && d.stockMinimo >= 1
+        && d.perecedero is bool;
+    }
+
+    // ---------- Perfil de cada usuario ----------
+    match /usuarios/{userId} {
+      allow read, create, update: if autenticado() && request.auth.uid == userId;
+      allow delete: if false;
+    }
+
+    // ---------- Productos ----------
+    match /productos/{productoId} {
+      // get: también se permite leer un documento que ya no existe (pantalla de detalle tras eliminar).
+      allow get: if autenticado() && (resource == null || resource.data.uid == request.auth.uid);
+      allow list: if esDueno();
+      allow create: if escribeComoDueno() && productoValido();
+      allow update: if esDueno() && escribeComoDueno() && productoValido();
+      allow delete: if esDueno();
+    }
+
+    // ---------- Ventas (historial: no se editan ni se borran) ----------
+    match /ventas/{ventaId} {
+      allow read: if esDueno();
+      allow create: if escribeComoDueno()
+        && request.resource.data.cantidad is int && request.resource.data.cantidad > 0
+        && request.resource.data.total is int && request.resource.data.total > 0;
+      allow update, delete: if false;
+    }
+
+    // ---------- Categorías ----------
+    match /categorias/{categoriaId} {
+      allow read, delete: if esDueno();
+      allow create: if escribeComoDueno()
+        && request.resource.data.nombre is string && request.resource.data.nombre.size() >= 3;
+      allow update: if false;
+    }
+
+    // ---------- Todo lo demás queda bloqueado ----------
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
